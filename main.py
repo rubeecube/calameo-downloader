@@ -1,134 +1,155 @@
+import os
+import time
 import requests
 from bs4 import BeautifulSoup
-from time import sleep
-import cairosvg
-import os
-from PyPDF2 import PdfFileMerger
-from fpdf import FPDF
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from PIL import Image
-import urllib3.contrib.pyopenssl
+from fpdf import FPDF
+import cairosvg
 import progressbar
 
-#Configurations
-book_url_list = []
-only_pdf = False
 
-with requests.Session() as s:
-    for book_url in book_url_list:
-        if not only_pdf:
-            image_list = []
-            pdf_list = []
-            #
-            #Download from SVG to PDF
-            #
-            print("--> Downloading from SVG to PDF")
-            
-            headers = {
-                'Upgrade-Insecure-Requests': '1',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36'
-            }
-            r = s.get(book_url, headers=headers)
+def setup_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    return webdriver.Chrome(options=options)
 
-            parsed_html = BeautifulSoup(r.text, "lxml")
-            og_link = parsed_html.head.find('meta', attrs={'property':'og:image'})["content"].replace("1.svgz","").replace("1.jpg","")
-            book_description = parsed_html.head.find('meta', attrs={'name':'description'})["content"]
-            
-            pre_book_title = (book_description.find("Title:"))
-            post_book_title = (book_description.find(", Author"))
-            book_title = book_description[pre_book_title+7:post_book_title]
-            
-            pre_book_length = (book_description.find("Length:"))
-            post_book_length = (book_description.find(" pages,"))
-            book_length = book_description[pre_book_length+8:post_book_length]
-            #Download all SVG files
-            print("Downloading all "+book_length+" SVG files...")
-            for i in progressbar.progressbar(range(int(book_length))):
-                while True:
-                    try:
-                        r = s.get(og_link+str(i+1)+".svgz",headers=headers)
-                        break
-                    except:
-                        #print("Error")
-                        continue
-                with open('output'+str(i+1)+".svg", 'wb') as out_file:
-                    out_file.write(r.content)
-                image_list.append("output"+str(i+1)+".svg")
-            #Convert SVG to PDF
-            print("Converting all SVG files to PDF...")
-            with progressbar.ProgressBar(max_value=int(book_length)) as bar:
-                for idx, image in enumerate(image_list):
-                    cairosvg.svg2pdf(url=image, write_to="output"+str(idx+1)+".pdf")
-                    pdf_list.append("output"+str(idx+1)+".pdf")
-                    bar.update(idx)
-            #Join all PDF's
-            print("Joining and exporting all PDFs...")
-            merger = PdfFileMerger()
-            with progressbar.ProgressBar(max_value=int(book_length)) as bar:
-                for idx, pdf in enumerate(pdf_list):
-                    merger.append(pdf)
-                    bar.update(idx)
-            merger.write("SVG - "+book_title+".pdf")
-            merger.close()
 
-            for image in image_list:
-                os.remove(image)
-            
-            for pdf in pdf_list:
-                os.remove(pdf)
+def parse_document_info(soup):
+    """Extract title, length, and first image URL (p1.svgz or p1.jpg)"""
+    # Get meta description
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if not meta_desc:
+        raise Exception("Could not find document description.")
+    desc = meta_desc["content"]
 
-            
-        image_list = []
-        #
-        #Download from JPG to PDF
-        #
-        print("")
-        print("--> Downloading from JPG to PDF")
-        headers = {
-            'Upgrade-Insecure-Requests': '1',
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36'
-        }
-        r = s.get(book_url, headers=headers)
-        #print(r.text)
+    # Parse title
+    title = "CalameoBook"
+    if "Title:" in desc:
+        title = desc.split("Title:")[1].split(", Author")[0].strip()
 
-        parsed_html = BeautifulSoup(r.text, "lxml")
-        og_link = parsed_html.head.find('meta', attrs={'property':'og:image'})["content"].replace("1.svgz","").replace("1.jpg","")
-        book_description = parsed_html.head.find('meta', attrs={'name':'description'})["content"]
-        
-        pre_book_title = (book_description.find("Title:"))
-        post_book_title = (book_description.find(", Author"))
-        book_title = book_description[pre_book_title+7:post_book_title]
-        
-        pre_book_length = (book_description.find("Length:"))
-        post_book_length = (book_description.find(" pages,"))
-        book_length = book_description[pre_book_length+8:post_book_length]
-        #Download all JPG files
-        print("Downloading all JPG files...")
-        for i in progressbar.progressbar(range(int(book_length))):
-            while True:
-                try:
-                    r = s.get(og_link+str(i+1)+".jpg",headers=headers)
-                    break
-                except:
-                    #print("Error")
-                    continue
+    # Parse length
+    if "Length:" in desc:
+        length_text = desc.split("Length:")[1].split(" pages")[0].strip()
+        length = int(length_text)
+    else:
+        raise Exception("Could not detect document length.")
 
-            with open('output'+str(i+1)+".jpg", 'wb') as out_file:
-                out_file.write(r.content)
-            image_list.append("output"+str(i+1)+".jpg")
-        #Join all JPG's
-        print("Joining all JPG files into final PDF...")
-        cover = Image.open(image_list[0])
-        width, height = cover.size
+    # Get first page (usually p1.svgz or p1.jpg)
+    img_tag = soup.find("img", class_="page")
+    if not img_tag:
+        raise Exception("No <img class='page'> tag found.")
+    first_page_url = img_tag["src"]
 
-        pdf = FPDF(unit = "pt", format = [width, height])
+    return title, length, first_page_url
 
-        with progressbar.ProgressBar(max_value=int(book_length)) as bar:
-            for idx, page in enumerate(image_list):
-                pdf.add_page()
-                pdf.image(page, 0, 0)
-                bar.update(idx)
 
-        pdf.output("JPG - "+book_title+".pdf", "F")
+def generate_all_page_urls(first_page_url, total_pages):
+    """Generate all page URLs based on pattern found in first_page_url"""
+    prefix, file_ext = first_page_url.split("p1.")
+    urls = [f"{prefix}p{i}.{file_ext}" for i in range(1, total_pages + 1)]
+    return urls
 
-        for image in image_list:
-            os.remove(image)
+
+def download_all_images(image_urls):
+    """Download list of images and return filepaths"""
+    os.makedirs("downloads", exist_ok=True)
+    image_paths = []
+
+    print(f"\n[↓] Downloading {len(image_urls)} pages...\n")
+    bar = progressbar.ProgressBar(maxval=len(image_urls))
+    bar.start()
+    for i, url in enumerate(image_urls):
+        ext = url.split(".")[-1]
+        filename = f"downloads/page_{i+1}.{ext.split('?')[0]}"
+
+        try:
+            r = requests.get(url, stream=True, timeout=10)
+            with open(filename, "wb") as f:
+                f.write(r.content)
+            image_paths.append(filename)
+        except Exception as e:
+            print(f"❌ Failed to download page {i+1}: {e}")
+        bar.update(i)
+    bar.finish()
+
+    return image_paths
+
+
+def convert_images_to_pdf(image_paths, out_pdf):
+    print("\n[⇄] Converting to PDF...\n")
+    pdf = FPDF()
+
+    bar = progressbar.ProgressBar(maxval=len(image_paths))
+    bar.start()
+    for i, path in enumerate(image_paths):
+        if path.endswith(".svgz") or path.endswith(".svg"):
+            # Convert SVGZ to PNG
+            png_path = path.replace(".svgz", ".png").replace(".svg", ".png")
+            cairosvg.svg2png(url=path, write_to=png_path)
+            image = Image.open(png_path)
+        else:
+            image = Image.open(path)
+
+        width, height = image.size
+        pdf_w, pdf_h = float(width * 0.75), float(height * 0.75)  # Resize for FPDF
+        pdf.add_page()
+        pdf.image(path if not path.endswith(".svgz") else png_path, 0, 0, pdf_w, pdf_h)
+        bar.update(i)
+
+    bar.finish()
+    pdf.output(out_pdf)
+    print(f"\n✅ PDF saved as '{out_pdf}'")
+
+
+def cleanup_folder(folder="downloads"):
+    print("\n[🧹] Cleaning up temporary files...")
+    for file in os.listdir(folder):
+        os.remove(os.path.join(folder, file))
+    os.rmdir(folder)
+    print("✔ Cleanup complete.")
+
+
+def main(calameo_url):
+    print(f"📘 Processing Calameo URL: {calameo_url}")
+
+    # Step 1: Load page and parse info
+    driver = setup_driver()
+    driver.get(calameo_url)
+    title = None
+    while title is None:
+        time.sleep(1)  # wait for JS-rendered elements
+        soup = BeautifulSoup(driver.page_source, "lxml")
+        try:
+            title, page_count, first_page_url = parse_document_info(soup)
+        except Exception:
+            pass
+    driver.quit()
+    print(f"📖 Title: {title}")
+    print(f"📄 Pages: {page_count}")
+    print(f"🖼 First Page URL: {first_page_url}")
+
+    # Step 2: Generate all URLs
+    all_urls = generate_all_page_urls(first_page_url, page_count)
+
+    # Step 3: Download all pages
+    image_files = download_all_images(all_urls)
+
+    # Step 4: Convert to PDF
+    output_pdf_name = f"{title}.pdf"
+    convert_images_to_pdf(image_files, output_pdf_name)
+
+    # Step 5: Clean up
+    cleanup_folder("downloads")
+
+
+if __name__ == "__main__":
+    book_url_list = []
+    only_pdf = False
+
+    for url in book_url_list:
+        main(url)
