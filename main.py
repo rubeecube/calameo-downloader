@@ -8,6 +8,16 @@ from PIL import Image
 from fpdf import FPDF
 import cairosvg
 import progressbar
+import re
+import argparse
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(description="Book processing pipeline")
+    parser.add_argument('--book_url_list', nargs='+', required=True, help='List of book URLs to process')
+    parser.add_argument('--only_pdf', action='store_true', help='Process PDF only')
+    parser.add_argument('--cleanup', action='store_true', help='Cleanup temporary files after processing')
+    args = parser.parse_args()
+    return args.book_url_list, args.only_pdf, args.cleanup
 
 
 def setup_driver():
@@ -66,14 +76,16 @@ def download_all_images(image_urls):
     for i, url in enumerate(image_urls):
         ext = url.split(".")[-1]
         filename = f"downloads/page_{i+1}.{ext.split('?')[0]}"
-
-        try:
-            r = requests.get(url, stream=True, timeout=10)
-            with open(filename, "wb") as f:
-                f.write(r.content)
+        if os.path.exists(filename):
             image_paths.append(filename)
-        except Exception as e:
-            print(f"❌ Failed to download page {i+1}: {e}")
+        else:
+            try:
+                r = requests.get(url)
+                with open(filename, "wb") as f:
+                    f.write(r.content)
+                image_paths.append(filename)
+            except Exception as e:
+                print(f"❌ Failed to download page {i+1}: {e}")
         bar.update(i)
     bar.finish()
 
@@ -82,24 +94,22 @@ def download_all_images(image_urls):
 
 def convert_images_to_pdf(image_paths, out_pdf):
     print("\n[⇄] Converting to PDF...\n")
-    pdf = FPDF()
 
+    cover = Image.open(image_paths[0])
+    width, height = cover.size
+    pdf = FPDF(unit = "pt", format = [width, height])
     bar = progressbar.ProgressBar(maxval=len(image_paths))
     bar.start()
-    for i, path in enumerate(image_paths):
-        if path.endswith(".svgz") or path.endswith(".svg"):
-            # Convert SVGZ to PNG
-            png_path = path.replace(".svgz", ".png").replace(".svg", ".png")
-            cairosvg.svg2png(url=path, write_to=png_path)
-            image = Image.open(png_path)
-        else:
-            image = Image.open(path)
+    for idx, image_path in enumerate(image_paths):
+        if image_path.endswith(".svgz") or image_path.endswith(".svg"):
+            png_path = image_path.replace(".svgz", ".png").replace(".svg", ".png")
+            cairosvg.svg2png(url=image_path, write_to=png_path)
+            image_path = png_path
 
-        width, height = image.size
-        pdf_w, pdf_h = float(width * 0.75), float(height * 0.75)  # Resize for FPDF
+        image = Image.open(image_path)
         pdf.add_page()
-        pdf.image(path if not path.endswith(".svgz") else png_path, 0, 0, pdf_w, pdf_h)
-        bar.update(i)
+        pdf.image(image_path, -50, -50, width+100, height+100)
+        bar.update(idx)
 
     bar.finish()
     pdf.output(out_pdf)
@@ -114,7 +124,7 @@ def cleanup_folder(folder="downloads"):
     print("✔ Cleanup complete.")
 
 
-def main(calameo_url):
+def main(calameo_url, only_pdf, cleanup):
     print(f"📘 Processing Calameo URL: {calameo_url}")
 
     # Step 1: Load page and parse info
@@ -134,7 +144,10 @@ def main(calameo_url):
     print(f"🖼 First Page URL: {first_page_url}")
 
     # Step 2: Generate all URLs
-    all_urls = generate_all_page_urls(first_page_url, page_count)
+    if only_pdf:
+        all_urls = generate_all_page_urls(first_page_url.replace("svgz", 'jpg'), page_count)
+    else:
+        all_urls = generate_all_page_urls(first_page_url, page_count)
 
     # Step 3: Download all pages
     image_files = download_all_images(all_urls)
@@ -144,12 +157,11 @@ def main(calameo_url):
     convert_images_to_pdf(image_files, output_pdf_name)
 
     # Step 5: Clean up
-    cleanup_folder("downloads")
+    if cleanup:
+        cleanup_folder("downloads")
 
 
 if __name__ == "__main__":
-    book_url_list = []
-    only_pdf = False
-
+    book_url_list, only_pdf, cleanup = parse_cli_args()
     for url in book_url_list:
-        main(url)
+        main(url, only_pdf, cleanup)
